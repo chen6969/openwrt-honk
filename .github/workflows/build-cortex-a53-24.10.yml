@@ -1,0 +1,80 @@
+# 只构建 aarch64_cortex-a53 + OpenWrt 24.10 的 IPK（复用上游构建脚本）
+# 用法：放到仓库 .github/workflows/ 下，在 Actions 页面手动 Run workflow。
+# 产物以 artifact 形式提供下载（不需要 GitHub Release，最快最省）。
+name: Build honk aarch64_cortex-a53 24.10 ipk
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [build-cortex-a53-24.10]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build aarch64_cortex-a53 / openwrt-24.10
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Resolve SDK cache identity
+        id: sdk-cache-key
+        shell: bash
+        env:
+          SDK_IMAGE: ghcr.io/openwrt/sdk:aarch64_cortex-a53-openwrt-24.10
+        run: |
+          set -euo pipefail
+          docker pull "$SDK_IMAGE"
+          image_id=$(docker image inspect --format '{{.Id}}' "$SDK_IMAGE")
+          echo "image_id=$image_id" >>"$GITHUB_OUTPUT"
+
+      - name: Build packages in OpenWrt SDK
+        shell: bash
+        env:
+          SDK_IMAGE: ghcr.io/openwrt/sdk:aarch64_cortex-a53-openwrt-24.10
+          BPF_LINKER_SHA256: 4dda77daab6c5f120a468e6d3ede2498f5bd47ece712172cfb7290176d93d015
+          BPF_LINKER_VERSION: 0.10.4
+          BPF_RUST_TOOLCHAIN: nightly-2026-07-20
+          RUST_FEED_COMMIT: 2006dff59caa09bc3bc22ffdc84df2aa1c8d0c8a
+          SCCACHE_VERSION: 0.17.0
+          SCCACHE_SHA256: 67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006
+        run: |
+          set -euo pipefail
+          mkdir -p .build-output
+          sudo chown -R 1000:1000 .build-output
+          docker run --rm \
+            --user root \
+            --env BPF_LINKER_SHA256 \
+            --env BPF_LINKER_VERSION \
+            --env BPF_RUST_TOOLCHAIN \
+            --env RUST_FEED_COMMIT \
+            --env SCCACHE_VERSION \
+            --env SCCACHE_SHA256 \
+            --volume "$GITHUB_WORKSPACE:/feed:ro" \
+            --volume "$GITHUB_WORKSPACE/.build-output:/artifacts" \
+            "$SDK_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends ca-certificates curl git zstd libclang-dev clang llvm libbpf-dev pkg-config cmake
+              chown -R buildbot:buildbot /artifacts
+              exec runuser --user buildbot -- \
+                env BPF_LINKER_SHA256="$BPF_LINKER_SHA256" \
+                    BPF_LINKER_VERSION="$BPF_LINKER_VERSION" \
+                    BPF_RUST_TOOLCHAIN="$BPF_RUST_TOOLCHAIN" \
+                    RUST_FEED_COMMIT="$RUST_FEED_COMMIT" \
+                    SCCACHE_VERSION="$SCCACHE_VERSION" \
+                    SCCACHE_SHA256="$SCCACHE_SHA256" \
+                    bash /feed/.github/scripts/build-packages-in-sdk.sh
+            '
+          sudo chown -R "$(id -u):$(id -g)" .build-output
+
+      - name: Upload ipk artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: honk-aarch64_cortex-a53-openwrt-24.10-ipk
+          path: .build-output/bin/packages/aarch64_cortex-a53/honk_ci/*.ipk
+          if-no-files-found: error
+          retention-days: 30
